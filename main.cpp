@@ -595,7 +595,7 @@ namespace Luxos {
                 0,								    // First descriptor set
                 { descriptorSet },					// List of descriptor sets
                 {});								// Dynamic offsets
-            commandBuffer.dispatch(WIDTH/4, HEIGHT/4, 1);
+            commandBuffer.dispatch(WIDTH/16, (HEIGHT + HEIGHT % 16)/16, 1);
             //TODO: add support for when window is greater sized than the storage image
             vk::ImageCopy imageCopyRegion {
                 {   
