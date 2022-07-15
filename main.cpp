@@ -186,9 +186,12 @@ namespace Luxos {
         };
         Swapchain swapchain;
         vk::Image storageImage;
+        vk::DeviceMemory storageImageMemory;
         vk::ImageView storageImageView;
         vk::Pipeline computePipeline;
         vk::PipelineLayout pipelineLayout;
+        vk::DescriptorSetLayout descriptorSetLayout;
+        vk::DescriptorPool descriptorPool;
         vk::DescriptorSet descriptorSet;
         vk::CommandPool commandPool;
         vk::CommandBuffer commandBuffer;
@@ -201,7 +204,6 @@ namespace Luxos {
         // Window functions
         inline GLFWwindow* createWindow () {
             glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-            glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
             return glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);
         };
         inline void initializeGLFW () {
@@ -222,17 +224,6 @@ namespace Luxos {
             uint32_t glfwExtensionCount = 0;
             const char** glfwExtensions;
             glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
-            vk::InstanceCreateInfo instanceCreateInfo {
-                {},                      // Flags
-                &applicationInfo,        // Application Info
-                (uint32_t) validationLayers.size(), // Validation layer count
-                validationLayers.data(), // Validaiton layers
-                glfwExtensionCount,      // Extension count
-                glfwExtensions,          // Extension names
-                nullptr                  // pNext(idk what this is ngl)
-            };
-
-            if (!enableValidationLayers) instanceCreateInfo.enabledLayerCount = 0;
             #if DEBUGMODE
             std::cout << "Required extensions:\n";
             for (int i = 0; i < glfwExtensionCount; i++) {
@@ -244,7 +235,15 @@ namespace Luxos {
                 std::cout << '\t' << extension.extensionName << " " << extension.specVersion << '\n';
             }
             #endif
-            return vk::createInstance(instanceCreateInfo);
+            return vk::createInstance({
+                {},                                 // Flags
+                &applicationInfo,                   // Application Info
+                (uint32_t) validationLayers.size(), // Validation layer count
+                validationLayers.data(),            // Validaiton layers
+                glfwExtensionCount,                 // Extension count
+                glfwExtensions,                     // Extension names
+                nullptr                             // pNext(idk what this is ngl)
+            });
         };
         inline vk::SurfaceKHR createSurface() {
             auto p_surface = (VkSurfaceKHR) surface; // you can cast vk::* object to Vk* using a type cast
@@ -377,7 +376,7 @@ namespace Luxos {
                     break;
                 }
             }
-            vk::DeviceMemory storageImageMemory = device.allocateMemory({
+            storageImageMemory = device.allocateMemory({
                 memoryRequirements.size, // Size of image
                 memoryTypeIndex          // Memory type of iamge
             });
@@ -411,7 +410,7 @@ namespace Luxos {
                 {},
                 descriptorSetLayoutBindings
             );
-            vk::DescriptorSetLayout descriptorSetLayout = device.createDescriptorSetLayout(descriptorSetLayoutCreateInfo);
+            descriptorSetLayout = device.createDescriptorSetLayout(descriptorSetLayoutCreateInfo);
             // Create pipeline
             vk::PipelineLayoutCreateInfo pipelineLayoutCreateInfo = { {}, descriptorSetLayout };
             pipelineLayout = device.createPipelineLayout(pipelineLayoutCreateInfo);
@@ -428,6 +427,8 @@ namespace Luxos {
                 pipelineLayout
             };
             computePipeline = device.createComputePipeline(pipelineCache, computePipelineCreateInfo).value;
+            device.destroyShaderModule(shaderModule);
+            device.destroyPipelineCache(pipelineCache);
             // Create descriptor pool
             vk::DescriptorPoolSize descriptorPoolSize { vk::DescriptorType::eStorageImage, 2 };
             vk::DescriptorPoolCreateInfo descriptorPoolCreateInfo {
@@ -435,11 +436,12 @@ namespace Luxos {
                 1,
                 descriptorPoolSize
             };
-            vk::DescriptorPool descriptorPool = device.createDescriptorPool(descriptorPoolCreateInfo);
+            descriptorPool = device.createDescriptorPool(descriptorPoolCreateInfo);
             // Allocate descriptor set
             vk::DescriptorSetAllocateInfo descriptorSetAllocateInfo { descriptorPool, 1, &descriptorSetLayout };
             const std::vector<vk::DescriptorSet> descriptorSets = device.allocateDescriptorSets(descriptorSetAllocateInfo);
             descriptorSet = descriptorSets.front();
+            // Make image writable
             std::vector<vk::DescriptorImageInfo> imageInfos;
             vk::DescriptorImageInfo imageInfo {
                 VK_NULL_HANDLE,
@@ -539,10 +541,32 @@ namespace Luxos {
             generateBaseCommands();
             if (device.waitForFences(1, &baseCommandsFinishedFence, VK_TRUE, UINT64_MAX) == vk::Result::eErrorDeviceLost) throw std::runtime_error("device lost!");
         };
+        void recreateSwapChain() {
+            #if DEBUGMODE
+            std::cout << "window resized\n";
+            #endif
+            int width = 0, height = 0;
+            glfwGetFramebufferSize(window, &width, &height);
+            while (width == 0 || height == 0) {
+                glfwGetFramebufferSize(window, &width, &height);
+                glfwWaitEvents();
+            }
+
+            vkDeviceWaitIdle(device);
+            swapchain.destroy();
+            swapchain = createSwapchain();
+        }
         inline void drawFrame() {
             device.waitForFences(1, &inFlightFence, VK_TRUE, UINT64_MAX);
             device.resetFences(1, &inFlightFence);
-            uint32_t imageIndex = device.acquireNextImageKHR(swapchain.swapchain, UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE).value;
+            vk::ResultValue swapchainImageResult = device.acquireNextImageKHR(swapchain.swapchain, UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE);
+            if (swapchainImageResult.result == vk::Result::eErrorOutOfDateKHR) {
+                recreateSwapChain();
+                return;
+            } else if (swapchainImageResult.result != vk::Result::eSuccess && swapchainImageResult.result != vk::Result::eSuboptimalKHR) {
+                throw std::runtime_error("failed to acquire swap chain image!");
+            }
+            uint32_t imageIndex = swapchainImageResult.value;
             vk::Image swapchainImage = swapchain.images[imageIndex];
             // Do layout transition 
             vk::ImageMemoryBarrier undefinedToOptimizedDestinationBarrier(
@@ -571,7 +595,8 @@ namespace Luxos {
                 0,								    // First descriptor set
                 { descriptorSet },					// List of descriptor sets
                 {});								// Dynamic offsets
-            commandBuffer.dispatch(WIDTH/16, HEIGHT/16, 1);
+            commandBuffer.dispatch(WIDTH/4, HEIGHT/4, 1);
+            //TODO: add support for when window is greater sized than the storage image
             vk::ImageCopy imageCopyRegion {
                 {   
                     vk::ImageAspectFlagBits::eColor,
@@ -642,10 +667,12 @@ namespace Luxos {
             presentInfo.swapchainCount = 1;
             presentInfo.pSwapchains = swapchains;
             presentInfo.pImageIndices = &imageIndex;
-            #if DEBUGMODE
-            if(presentQueue.presentKHR(&presentInfo) != vk::Result::eSuccess) std::cout << "failed\n";
-            #endif
-
+            vk::Result presentResult = presentQueue.presentKHR(&presentInfo);
+            if (presentResult == vk::Result::eErrorOutOfDateKHR || presentResult == vk::Result::eSuboptimalKHR) {
+                recreateSwapChain();
+            } else if (presentResult != vk::Result::eSuccess) {
+                throw std::runtime_error((int) presentResult + "failed to present swap chain image!");
+            }
         };
         void loop() {
             while (!glfwWindowShouldClose(window)) {
@@ -660,17 +687,20 @@ namespace Luxos {
             #endif
         };
         void cleanup() {
-            /*
             vkDestroySemaphore(device, imageAvailableSemaphore, nullptr);
             vkDestroySemaphore(device, renderFinishedSemaphore, nullptr);
             vkDestroyFence(device, inFlightFence, nullptr);
+            vkDestroyFence(device, baseCommandsFinishedFence, nullptr);
             vkDestroyCommandPool(device, commandPool, nullptr);
-            for (auto framebuffer : swapChainFramebuffers) {
-                vkDestroyFramebuffer(device, framebuffer, nullptr);
-            }
-            vkDestroyPipeline(device, graphicsPipeline, nullptr);
-            vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-            */
+            // TODO: contain storage image in wrapper
+            device.destroyImage(storageImage);
+            device.freeMemory(storageImageMemory);
+            device.destroyImageView(storageImageView);
+            // TODO: contain descriptor set in wrapper
+            device.destroyDescriptorSetLayout(descriptorSetLayout);
+            device.destroyDescriptorPool(descriptorPool);
+            device.destroyPipeline(computePipeline);
+            device.destroyPipelineLayout(pipelineLayout);
             swapchain.destroy();
             device.destroy();
             instance.destroySurfaceKHR(surface);
@@ -696,7 +726,7 @@ int main() {
         app.run();
     } catch (const std::exception& e) {
         #if DEBUGMODE
-        std::cerr << e.what() << "\n";
+        std::cerr << "\u001b[31m" << e.what() << "\u001b[0m\n";
         #endif
         return EXIT_FAILURE;
     }
