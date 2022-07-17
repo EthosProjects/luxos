@@ -1,17 +1,80 @@
 #version 450
-
-layout (set = 0, binding = 0, rgba8) uniform image2D outputImage;
 layout (local_size_x = 16, local_size_y = 16) in;
 int [3] mega = int[](3, 2, 1);
+struct Camera {
+    vec3 positionVector;
+    vec3 lookAtVector;
+    vec3 upVector;
+    float len;
+    float width;
+    float aspectRatio;
+    
+    vec3 alignmentVector;
+    vec3 UVector;
+    vec3 VVector;
+    vec3 projectionScreenCenterVector;
+};
+struct Ray {
+    vec3 aVector;
+    vec3 bVector;
+    vec3 labVector;
+};
+layout (set = 0, binding = 0, rgba8) uniform image2D outputImage;
+layout (set = 0, binding = 1) uniform camera {
+    Camera m_camera;
+};
+Camera createCamera () {
+    Camera camera;
+    camera.positionVector = vec3(0.0, -10, -2.0);
+    camera.lookAtVector = vec3(0.0, 0.0, 0.0);
+    camera.upVector = vec3(0.0, 0.0, 1.0);
+    camera.len = 1.0;
+    camera.width = 0.25;
+    camera.aspectRatio = (16.0 / 9.0);
+    camera.alignmentVector = normalize(camera.lookAtVector - camera.positionVector);
+	camera.UVector = normalize(cross(camera.alignmentVector, camera.upVector)) * camera.width;
+	camera.VVector = normalize(cross(camera.UVector, camera.alignmentVector)) * (camera.width / camera.aspectRatio);
+	camera.projectionScreenCenterVector = camera.positionVector + (camera.alignmentVector * camera.len);
+    return camera;
+}
+Ray generateCameraRay (Camera t_camera, float projectionScreenX, float projectionScreenY) {
+    // Compute the location of the screen point in world coordinates.
+	vec3 screenWorldPart1 = t_camera.projectionScreenCenterVector + (t_camera.UVector * projectionScreenX);
+	vec3 screenWorldCoordinate = screenWorldPart1 + (t_camera.VVector * projectionScreenY);
+	
+	// Use this point along with the camera position to compute the ray.
+    Ray cameraRay;
+	cameraRay.aVector = t_camera.positionVector;
+	cameraRay.bVector = screenWorldCoordinate;
+	cameraRay.labVector = screenWorldCoordinate - t_camera.positionVector;
+    return cameraRay;
+}
+
 void main() {
+    Camera camera = createCamera();
     ivec2 pixelLocation = ivec2(
         gl_GlobalInvocationID.x % 1920, 
         gl_GlobalInvocationID.y % 1080
     );
     vec3 color = vec3 (
-        mega[1]/3.f,
-        pixelLocation.y/1080.f,
+        0.f,
+        0.f,
         0.f
     );
+    bool intersection = true;
+    float xFactor = 2.0 / 1920.f;
+    float yFactor = 2.0 / 1080.f;
+    float normX = pixelLocation.x * xFactor - 1.0;
+    float normY = pixelLocation.y * yFactor - 1.0;
+    Ray cameraRay = generateCameraRay(camera, normX, normY);
+    vec3 vhat = normalize(cameraRay.labVector);
+    float b = 2.0 * dot(cameraRay.aVector, vhat);
+	// Calculate c.
+	float c = dot(cameraRay.aVector, cameraRay.aVector) - 1.0;
+	
+	// Test whether we actually have an intersection.
+	float intersectionTest = (b*b) - 4.0 * c;
+	if (intersectionTest < 0.0) intersection = false;
+    if (intersection) color.r = 0.75;
     imageStore(outputImage, pixelLocation, vec4(pow(color.r, 1/2.2), pow(color.g, 1/2.2), pow(color.b, 1/2.2), 1.f));
 }

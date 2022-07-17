@@ -211,6 +211,7 @@ namespace Luxos {
             window = createWindow();
             if (window == nullptr) throw std::runtime_error("Failed to create window");
             glfwSetWindowPos(window, 0, 30);
+            //glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
         };
         // Vulkan functions
         inline vk::Instance createInstance() {
