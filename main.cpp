@@ -188,8 +188,10 @@ namespace Luxos {
         vk::Image storageImage;
         vk::DeviceMemory storageImageMemory;
         vk::ImageView storageImageView;
+        vk::ShaderModule shaderModule;
         vk::Pipeline computePipeline;
         vk::PipelineLayout pipelineLayout;
+        vk::PipelineCache pipelineCache;
         vk::DescriptorSetLayout descriptorSetLayout;
         vk::DescriptorPool descriptorPool;
         vk::DescriptorSet descriptorSet;
@@ -389,15 +391,7 @@ namespace Luxos {
             std::cout << "Required Memory Size : " << memoryRequirements.size / 1024.f / 1024.f << " MB \n";
             #endif
         };
-        inline void createComputePipeline() {
-            // TODO: Split this function into smaller functions for more modularity and abstraction
-            auto computeShaderCode = readFile("Square.spv");
-            vk::ShaderModuleCreateInfo shaderModuleCreateInfo {
-                {},
-                computeShaderCode.size(),
-                reinterpret_cast<const uint32_t*>(computeShaderCode.data())
-            };
-            vk::ShaderModule shaderModule = device.createShaderModule(shaderModuleCreateInfo);
+        inline vk::DescriptorSetLayout createDescriptorSetLayout() {
             // Create descriptor set layout
             std::vector<vk::DescriptorSetLayoutBinding> descriptorSetLayoutBindings {
                 {
@@ -411,11 +405,23 @@ namespace Luxos {
                 {},
                 descriptorSetLayoutBindings
             );
-            descriptorSetLayout = device.createDescriptorSetLayout(descriptorSetLayoutCreateInfo);
-            // Create pipeline
-            vk::PipelineLayoutCreateInfo pipelineLayoutCreateInfo = { {}, descriptorSetLayout };
-            pipelineLayout = device.createPipelineLayout(pipelineLayoutCreateInfo);
-            vk::PipelineCache pipelineCache = device.createPipelineCache({});
+            return device.createDescriptorSetLayout(descriptorSetLayoutCreateInfo);
+        };
+        inline vk::ShaderModule createShaderModule() {
+            auto computeShaderCode = readFile("Square.spv");
+            return device.createShaderModule({
+                {},
+                computeShaderCode.size(),
+                reinterpret_cast<const uint32_t*>(computeShaderCode.data())
+            });
+        };
+        inline vk::PipelineLayout createPipelineLayout() {
+            return device.createPipelineLayout({ {}, descriptorSetLayout });
+        };
+        inline vk::PipelineCache createPipelineCache() {
+            return device.createPipelineCache({});
+        };
+        inline vk::Pipeline createComputePipeline() {
             vk::PipelineShaderStageCreateInfo pipelineShaderStageCreateInfo {
                 {},
                 vk::ShaderStageFlagBits::eCompute,
@@ -427,9 +433,9 @@ namespace Luxos {
                 pipelineShaderStageCreateInfo,
                 pipelineLayout
             };
-            computePipeline = device.createComputePipeline(pipelineCache, computePipelineCreateInfo).value;
-            device.destroyShaderModule(shaderModule);
-            device.destroyPipelineCache(pipelineCache);
+            return device.createComputePipeline(pipelineCache, computePipelineCreateInfo).value;
+        };
+        inline vk::DescriptorPool createDescriptorPool() {
             // Create descriptor pool
             vk::DescriptorPoolSize descriptorPoolSize { vk::DescriptorType::eStorageImage, 2 };
             vk::DescriptorPoolCreateInfo descriptorPoolCreateInfo {
@@ -437,12 +443,15 @@ namespace Luxos {
                 1,
                 descriptorPoolSize
             };
-            descriptorPool = device.createDescriptorPool(descriptorPoolCreateInfo);
+            return device.createDescriptorPool(descriptorPoolCreateInfo);
+        };
+        inline vk::DescriptorSet createDescriptorSet() {
             // Allocate descriptor set
             vk::DescriptorSetAllocateInfo descriptorSetAllocateInfo { descriptorPool, 1, &descriptorSetLayout };
             const std::vector<vk::DescriptorSet> descriptorSets = device.allocateDescriptorSets(descriptorSetAllocateInfo);
-            descriptorSet = descriptorSets.front();
-            // Make image writable
+            return descriptorSets.front();
+        };
+        inline void makeDescriptorsWritable() {
             std::vector<vk::DescriptorImageInfo> imageInfos;
             vk::DescriptorImageInfo imageInfo {
                 VK_NULL_HANDLE,
@@ -460,7 +469,7 @@ namespace Luxos {
                 }
             }, {});
         };
-        vk::CommandPool createCommandPool() {
+        inline vk::CommandPool createCommandPool() {
             // TODO: return command pool
             QueueFamilyIndices queueFamilyIndices = getQueueFamilyIndexes(physicalDevice, surface);
             vk::CommandPoolCreateInfo poolInfo {
@@ -535,9 +544,16 @@ namespace Luxos {
             storageImage = createStorageImage();
             allocateStorageImage();
             storageImageView = createStorageImageView();
-            createComputePipeline();
+            descriptorSetLayout = createDescriptorSetLayout();
+            shaderModule = createShaderModule();
+            pipelineLayout = createPipelineLayout();
+            pipelineCache = createPipelineCache();
+            computePipeline = createComputePipeline();
             commandPool = createCommandPool();
             commandBuffer = createCommandBuffer();
+            descriptorPool = createDescriptorPool();
+            descriptorSet = createDescriptorSet();
+            makeDescriptorsWritable();
             createSyncObjects();
             generateBaseCommands();
             if (device.waitForFences(1, &baseCommandsFinishedFence, VK_TRUE, UINT64_MAX) == vk::Result::eErrorDeviceLost) throw std::runtime_error("device lost!");
@@ -698,10 +714,12 @@ namespace Luxos {
             device.freeMemory(storageImageMemory);
             device.destroyImageView(storageImageView);
             // TODO: contain descriptor set in wrapper
+            device.destroyShaderModule(shaderModule);
             device.destroyDescriptorSetLayout(descriptorSetLayout);
             device.destroyDescriptorPool(descriptorPool);
             device.destroyPipeline(computePipeline);
             device.destroyPipelineLayout(pipelineLayout);
+            device.destroyPipelineCache(pipelineCache);
             swapchain.destroy();
             device.destroy();
             instance.destroySurfaceKHR(surface);
