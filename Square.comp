@@ -1,6 +1,5 @@
 #version 450
 layout (local_size_x = 16, local_size_y = 16) in;
-int [3] mega = int[](3, 2, 1);
 struct Camera {
     vec3 positionVector;
     vec3 lookAtVector;
@@ -20,11 +19,12 @@ struct Ray {
     vec3 labVector;
 };
 layout (set = 0, binding = 0, rgba8) uniform image2D outputImage;
-layout (set = 0, binding = 1) uniform camera {
-    Camera m_camera;
+layout (set = 0, binding = 1) uniform cameraUniform {
+    Camera camera;
 };
 Camera createCamera () {
-    Camera camera;
+    Camera camera = camera;
+    
     camera.positionVector = vec3(0.0, -10, -2.0);
     camera.lookAtVector = vec3(0.0, 0.0, 0.0);
     camera.upVector = vec3(0.0, 0.0, 1.0);
@@ -51,7 +51,6 @@ Ray generateCameraRay (Camera t_camera, float projectionScreenX, float projectio
 }
 
 void main() {
-    Camera camera = createCamera();
     ivec2 pixelLocation = ivec2(
         gl_GlobalInvocationID.x % 1920, 
         gl_GlobalInvocationID.y % 1080

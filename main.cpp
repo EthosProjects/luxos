@@ -1,6 +1,7 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 #include <vulkan/vulkan.hpp>
+#include <GLM/glm.hpp>
 #ifdef DEBUGMODE
 #include <iostream>
 #endif
@@ -15,14 +16,13 @@
 //This is the width and height of the window
 const uint32_t WIDTH = 1920;
 const uint32_t HEIGHT = 1080;
-
+const uint32_t MAX_FRAMES_IN_FLIGHT = 1;
 const std::vector<const char*> validationLayers = {
     "VK_LAYER_KHRONOS_validation"
 };
 const std::vector<const char*> deviceExtensions = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME
 };
-//#define DEBUGMODE true
 
 #if DEBUGMODE 
     const bool enableValidationLayers = true;
@@ -188,21 +188,40 @@ namespace Luxos {
         vk::Image storageImage;
         vk::DeviceMemory storageImageMemory;
         vk::ImageView storageImageView;
+        vk::DescriptorPool descriptorPool;
+        vk::DescriptorSet descriptorSet;
         vk::ShaderModule shaderModule;
         vk::Pipeline computePipeline;
         vk::PipelineLayout pipelineLayout;
         vk::PipelineCache pipelineCache;
         vk::DescriptorSetLayout descriptorSetLayout;
-        vk::DescriptorPool descriptorPool;
-        vk::DescriptorSet descriptorSet;
+
+        vk::Buffer indexBuffer;
+        vk::DeviceMemory indexBufferMemory;
+
+        std::vector<vk::Buffer> uniformBuffers;
+        std::vector<vk::DeviceMemory> uniformBuffersMemory;
+
         vk::CommandPool commandPool;
         vk::CommandBuffer commandBuffer;
         vk::Semaphore imageAvailableSemaphore;
         vk::Semaphore renderFinishedSemaphore;
         vk::Fence inFlightFence;
         vk::Fence baseCommandsFinishedFence;
-
-
+        struct Camera {
+            alignas(16) glm::vec3 positionVector;
+            alignas(16) glm::vec3 lookAtVector;
+            alignas(16) glm::vec3 upVector;
+            float len;
+            float width;
+            float aspectRatio;
+            
+            alignas(16) glm::vec3 alignmentVector;
+            alignas(16) glm::vec3 UVector;
+            alignas(16) glm::vec3 VVector;
+            alignas(16) glm::vec3 projectionScreenCenterVector;
+        };
+        Camera camera;
         // Window functions
         inline GLFWwindow* createWindow () {
             glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -399,6 +418,12 @@ namespace Luxos {
                     vk::DescriptorType::eStorageImage, 
                     1, 
                     vk::ShaderStageFlagBits::eCompute
+                },
+                vk::DescriptorSetLayoutBinding {
+                    1,
+                    vk::DescriptorType::eUniformBuffer,
+                    1,
+                    vk::ShaderStageFlagBits::eCompute
                 }
             };
             vk::DescriptorSetLayoutCreateInfo descriptorSetLayoutCreateInfo(
@@ -437,11 +462,14 @@ namespace Luxos {
         };
         inline vk::DescriptorPool createDescriptorPool() {
             // Create descriptor pool
-            vk::DescriptorPoolSize descriptorPoolSize { vk::DescriptorType::eStorageImage, 2 };
+            vk::DescriptorPoolSize descriptorPoolSize { vk::DescriptorType::eStorageImage, 1 };
+            vk::DescriptorPoolSize cameraDescriptorPoolSize { vk::DescriptorType::eUniformBuffer, 1 };
+            vk::DescriptorPoolSize descriptorPoolSizes[] {descriptorPoolSize, cameraDescriptorPoolSize};
             vk::DescriptorPoolCreateInfo descriptorPoolCreateInfo {
                 {}, 
                 1,
-                descriptorPoolSize
+                2,
+                descriptorPoolSizes
             };
             return device.createDescriptorPool(descriptorPoolCreateInfo);
         };
@@ -458,14 +486,31 @@ namespace Luxos {
                 storageImageView,
                 vk::ImageLayout::eGeneral
             };
+            for (size_t i = 0; i < 1; i++) {
+                vk::DescriptorBufferInfo bufferInfo {
+                    uniformBuffers[i],
+                    0,
+                    sizeof(Camera)
+                };
+                vk::WriteDescriptorSet descriptorWrite{};
+                descriptorWrite.dstSet = descriptorSet;
+                descriptorWrite.dstBinding = 1;
+                descriptorWrite.dstArrayElement = 0;
+                descriptorWrite.descriptorType = vk::DescriptorType::eUniformBuffer;
+                descriptorWrite.descriptorCount = 1;
+                descriptorWrite.pBufferInfo = &bufferInfo;
+                descriptorWrite.pImageInfo = nullptr; // Optional
+                descriptorWrite.pTexelBufferView = nullptr; // Optional
+                device.updateDescriptorSets(1, &descriptorWrite, 0, nullptr);
+            }
             device.updateDescriptorSets({ 
-                {
-                descriptorSet,
-                0,
-                (uint32_t) 0,
-                (uint32_t) 1,
-                vk::DescriptorType::eStorageImage,
-                &imageInfo
+                vk::WriteDescriptorSet {
+                    descriptorSet,
+                    0,
+                    (uint32_t) 0,
+                    (uint32_t) 1,
+                    vk::DescriptorType::eStorageImage,
+                    &imageInfo
                 }
             }, {});
         };
@@ -489,7 +534,42 @@ namespace Luxos {
             const std::vector<vk::CommandBuffer> commandBuffers = device.allocateCommandBuffers(commandBufferAllocateInfo);
             return commandBuffers.front();
         };
-        void createSyncObjects() {
+        uint32_t findMemoryType(uint32_t typeFilter, vk::MemoryPropertyFlags properties) {
+            vk::PhysicalDeviceMemoryProperties memoryProperties = physicalDevice.getMemoryProperties();
+            for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; i++) {
+                if ((typeFilter & (1 << i)) && (memoryProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+                    return i;
+                }
+            }
+            throw std::runtime_error("failed to find suitable memory type!");
+        }
+        void createBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage, vk::MemoryPropertyFlags properties, vk::Buffer& buffer, vk::DeviceMemory& bufferMemory) {
+            vk::BufferCreateInfo bufferInfo{
+                {},
+                size,
+                usage,
+                vk::SharingMode::eExclusive
+            };
+            if (device.createBuffer(&bufferInfo, nullptr, &buffer) != vk::Result::eSuccess) throw std::runtime_error("failed to create buffer!");
+            vk::MemoryRequirements memoryRequirements = device.getBufferMemoryRequirements(buffer);
+            vk::MemoryAllocateInfo allocateInfo {
+                memoryRequirements.size,
+                findMemoryType(memoryRequirements.memoryTypeBits, properties)
+            };
+            if (device.allocateMemory(&allocateInfo, nullptr, &bufferMemory) != vk::Result::eSuccess) throw std::runtime_error("failed to allocate buffer memory!");
+            device.bindBufferMemory(buffer, bufferMemory, 0);
+        }
+        inline void createUniformBuffers() {
+            VkDeviceSize bufferSize = sizeof(Camera);
+
+            uniformBuffers.resize(1);
+            uniformBuffersMemory.resize(1);
+
+            for (size_t i = 0; i < 1; i++) {
+                createBuffer(bufferSize, vk::BufferUsageFlagBits::eUniformBuffer, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent, uniformBuffers[i], uniformBuffersMemory[i]);
+            }
+        };
+        inline void createSyncObjects() {
             VkSemaphoreCreateInfo semaphoreInfo{};
             semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
             vk::FenceCreateInfo fenceInfo {
@@ -553,6 +633,8 @@ namespace Luxos {
             commandBuffer = createCommandBuffer();
             descriptorPool = createDescriptorPool();
             descriptorSet = createDescriptorSet();
+            createCamera();
+            createUniformBuffers();
             makeDescriptorsWritable();
             createSyncObjects();
             generateBaseCommands();
@@ -572,6 +654,12 @@ namespace Luxos {
             vkDeviceWaitIdle(device);
             swapchain.destroy();
             swapchain = createSwapchain();
+        }
+        void updateUniformBuffer(uint32_t currentImage) {
+            void* data;
+            device.mapMemory(uniformBuffersMemory[currentImage], 0, sizeof(camera), vk::MemoryMapFlags(), &data);
+            memcpy(data, &camera, sizeof(camera));
+            device.unmapMemory(uniformBuffersMemory[currentImage]);
         }
         inline void drawFrame() {
             device.waitForFences(1, &inFlightFence, VK_TRUE, UINT64_MAX);
@@ -657,7 +745,8 @@ namespace Luxos {
                 &optimizedDestinationToPresentBarrier
             );
             commandBuffer.end();
-            
+            updateUniformBuffer(0);
+
             vk::Semaphore waitSemaphores[] = { imageAvailableSemaphore };
             vk::Semaphore signalSemaphores[] = { renderFinishedSemaphore };
             vk::PipelineStageFlags waitStageFlags[] = {vk::PipelineStageFlagBits::eComputeShader};
@@ -669,9 +758,7 @@ namespace Luxos {
                 &commandBuffer, // List of command buffers
                 1,
                 signalSemaphores
-            };  
-            submitInfo.signalSemaphoreCount = 1;
-            submitInfo.pSignalSemaphores = signalSemaphores;
+            };
             
             computeQueue.submit({ submitInfo }, inFlightFence);
             device.waitForFences({ inFlightFence },			// List of fences
@@ -697,6 +784,18 @@ namespace Luxos {
                 drawFrame();
             }
         };
+        void createCamera() {
+            camera.positionVector = glm::vec3(0.0, -10, -2.0);
+            camera.lookAtVector = glm::vec3(0.0, 0.0, 0.0);
+            camera.upVector = glm::vec3(0.0, 0.0, 1.0);
+            camera.len = 1.0;
+            camera.width = 0.25;
+            camera.aspectRatio = (16.0 / 9.0);
+            camera.alignmentVector = glm::normalize(camera.lookAtVector - camera.positionVector);
+            camera.UVector = glm::normalize(glm::cross(camera.alignmentVector, camera.upVector)) * camera.width;
+            camera.VVector = glm::normalize(glm::cross(camera.UVector, camera.alignmentVector)) * (camera.width / camera.aspectRatio);
+            camera.projectionScreenCenterVector = camera.positionVector + (camera.alignmentVector * camera.len);
+        };
     public:
         Application() {
             #if DEBUGMODE
@@ -704,6 +803,11 @@ namespace Luxos {
             #endif
         };
         void cleanup() {
+            for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                vkDestroyBuffer(device, uniformBuffers[i], nullptr);
+                vkFreeMemory(device, uniformBuffersMemory[i], nullptr);
+            }
+
             vkDestroySemaphore(device, imageAvailableSemaphore, nullptr);
             vkDestroySemaphore(device, renderFinishedSemaphore, nullptr);
             vkDestroyFence(device, inFlightFence, nullptr);
